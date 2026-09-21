@@ -100,5 +100,42 @@ int main() {
   assert(recording.append({new_key, ss::Effect::Kind::draw}));
   assert(tracker.apply(recording) && tracker.state(new_key).drawn);
   assert(tracker.state(old_key).model == ss::Model::unknown);
+  // Issues #56 (AMD) / #73 (NVIDIA): a PassState storm must never present as
+  // unknown GPU state. Retirement uses pass_other (other, retained_rt kept),
+  // never unknown, so the tail keeps reporting a non-unknown state and
+  // CaptureProgress cannot latch "waiting for verified GPU state" while draws
+  // advance; rearm plus the next observed draw resumes capture.
+  {
+    constexpr ss::Key nose_feed{300, 3}, tail_feed{400, 4};
+    assert(tracker.register_source(nose_feed, ss::Model::legacy_rt));
+    assert(tracker.register_source(tail_feed, ss::Model::enhanced_rt));
+    ss::Recording setup;
+    assert(setup.append({nose_feed, ss::Effect::Kind::legacy_rt}));
+    assert(setup.append({nose_feed, ss::Effect::Kind::draw}));
+    assert(setup.append({tail_feed, ss::Effect::Kind::enhanced_rt}));
+    assert(setup.append({tail_feed, ss::Effect::Kind::draw}));
+    assert(tracker.apply(setup));
+    assert(tracker.state(nose_feed).drawn && tracker.state(tail_feed).drawn);
+    ss::Recording storm;
+    assert(storm.append({nose_feed, ss::Effect::Kind::pass_other}));
+    assert(tracker.apply(storm));
+    assert(tracker.state(nose_feed).model == ss::Model::other);
+    assert(tracker.state(nose_feed).model != ss::Model::unknown);
+    assert(tracker.state(tail_feed).model == ss::Model::enhanced_rt && tracker.state(tail_feed).drawn);
+    assert(tracker.rearm_retained_rt() == 1);
+    assert(tracker.state(nose_feed).model == ss::Model::legacy_rt && !tracker.state(nose_feed).drawn);
+    ss::Recording resume;
+    assert(resume.append({nose_feed, ss::Effect::Kind::draw}));
+    assert(tracker.apply(resume) && tracker.state(nose_feed).drawn);
+    taxi_camera::CaptureProgress retired;
+    assert(!retired.observe(100000, true, 9000, 1000000, false));
+    assert(!retired.observe(100000 + taxi_camera::CaptureProgress::StallMs, true, 9000, 1000100, false));
+    assert(!retired.stalled());
+    assert(!retired.observe(200000, true, 9000, 1000200, true));
+    assert(retired.observe(200000 + taxi_camera::CaptureProgress::StallMs + 1, true, 9000, 1000300, true));
+    assert(retired.stalled());
+    assert(!retired.observe(200000 + taxi_camera::CaptureProgress::StallMs + 2, true, 9001, 1000301, true));
+    assert(!retired.stalled());
+  }
   std::puts("Speed cutoff and capture-stall recovery: PASS");
 }
